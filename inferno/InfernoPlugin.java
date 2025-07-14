@@ -1483,26 +1483,48 @@ public class InfernoPlugin extends Plugin implements ExtensionPoint
         }
     }
 
-    public boolean isIndicateNpcPosition(InfernoNPC infernoNPC)
+    boolean isIndicateNpcPosition(InfernoNPC infernoNPC)
     {
-        // Show position indicators for all relevant NPC types
-        return infernoNPC.getType() == InfernoNPC.Type.MELEE ||
-                infernoNPC.getType() == InfernoNPC.Type.RANGER ||
-                infernoNPC.getType() == InfernoNPC.Type.MAGE ||
-                infernoNPC.getType() == InfernoNPC.Type.BLOB ||
-                infernoNPC.getType() == InfernoNPC.Type.BAT ||
-                infernoNPC.getType() == InfernoNPC.Type.JAD;
+        switch (infernoNPC.getType())
+        {
+            case BAT:
+                return config.indicateNpcPositionBat();
+            case BLOB:
+                return config.indicateNpcPositionBlob();
+            case MELEE:
+                return config.indicateNpcPositionMeleer();
+            case RANGER:
+                return config.indicateNpcPositionRanger();
+            case MAGE:
+                return config.indicateNpcPositionMage();
+            default:
+                return false;
+        }
     }
 
-    public boolean isTicksOnNpc(InfernoNPC infernoNPC)
+    boolean isTicksOnNpc(InfernoNPC infernoNPC)
     {
-        // Show ticks for all relevant NPC types
-        return infernoNPC.getType() == InfernoNPC.Type.MELEE ||
-                infernoNPC.getType() == InfernoNPC.Type.RANGER ||
-                infernoNPC.getType() == InfernoNPC.Type.MAGE ||
-                infernoNPC.getType() == InfernoNPC.Type.BLOB ||
-                infernoNPC.getType() == InfernoNPC.Type.BAT ||
-                infernoNPC.getType() == InfernoNPC.Type.JAD;
+        switch (infernoNPC.getType())
+        {
+            case BAT:
+                return config.ticksOnNpcBat();
+            case BLOB:
+                return config.ticksOnNpcBlob();
+            case MELEE:
+                return config.ticksOnNpcMeleer();
+            case RANGER:
+                return config.ticksOnNpcRanger();
+            case MAGE:
+                return config.ticksOnNpcMage();
+            case HEALER_JAD:
+                return config.ticksOnNpcHealerJad();
+            case JAD:
+                return config.ticksOnNpcJad();
+            case ZUK:
+                return config.ticksOnNpcZuk();
+            default:
+                return false;
+        }
     }
 
     private static int calculateNpcHp(int ratio, int health, int maxHp)
@@ -1550,16 +1572,48 @@ public class InfernoPlugin extends Plugin implements ExtensionPoint
 
     boolean isNormalSafespots(InfernoNPC infernoNPC)
     {
-        return infernoNPC.getType() != InfernoNPC.Type.NIBBLER
-                && infernoNPC.getType() != InfernoNPC.Type.HEALER_JAD
-                && infernoNPC.getType() != InfernoNPC.Type.HEALER_ZUK;
+        switch (infernoNPC.getType())
+        {
+            case BAT:
+                return config.safespotsBat();
+            case BLOB:
+                return config.safespotsBlob();
+            case MELEE:
+                return config.safespotsMeleer();
+            case RANGER:
+                return config.safespotsRanger();
+            case MAGE:
+                return config.safespotsMage();
+            case HEALER_JAD:
+                return config.safespotsHealerJad();
+            case JAD:
+                return config.safespotsJad();
+            default:
+                return false;
+        }
     }
 
     boolean isPrayerHelper(InfernoNPC infernoNPC)
     {
-        return infernoNPC.getType() != InfernoNPC.Type.NIBBLER
-                && infernoNPC.getType() != InfernoNPC.Type.HEALER_JAD
-                && infernoNPC.getType() != InfernoNPC.Type.HEALER_ZUK;
+        switch (infernoNPC.getType())
+        {
+            case BAT:
+                return config.prayerBat();
+            case BLOB:
+                return config.prayerBlob();
+            case MELEE:
+                return config.prayerMeleer();
+            case RANGER:
+                return config.prayerRanger();
+            case MAGE:
+                return config.prayerMage();
+            case HEALER_JAD:
+                return config.prayerHealerJad();
+            case JAD:
+                return config.prayerJad();
+            default:
+                return false;
+        }
     }
 
     void spawnDebug(String msg)

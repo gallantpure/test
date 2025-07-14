@@ -64,6 +64,10 @@ class InfernoNPC
 	//0 = not in LOS, 1 = in LOS after move, 2 = in LOS
 	private final Map<WorldPoint, Integer> safeSpotCache;
 
+	// Movement tracking variables
+	private WorldPoint lastNpcPosition;
+	private boolean isMovingTowardPlayer = false;
+
 	InfernoNPC(NPC npc)
 	{
 		this.npc = npc;
@@ -74,6 +78,7 @@ class InfernoNPC
 		this.lastCanAttack = false;
 		this.idleTicks = 0;
 		this.safeSpotCache = new HashMap<>();
+		this.lastNpcPosition = npc.getWorldLocation();
 	}
 
 	void updateNextAttack(Attack nextAttack, int ticksTillNextAttack)
@@ -294,6 +299,25 @@ class InfernoNPC
 		safeSpotCache.clear();
 		this.idleTicks += 1;
 
+		// Track NPC movement toward player
+		WorldPoint currentNpcPosition = this.getNpc().getWorldLocation();
+		WorldPoint playerLoc = client.getLocalPlayer().getWorldLocation();
+
+		if (lastNpcPosition != null && !lastNpcPosition.equals(currentNpcPosition))
+		{
+			// NPC moved - check if it's moving toward player
+			int oldDistance = lastNpcPosition.distanceTo(playerLoc);
+			int newDistance = currentNpcPosition.distanceTo(playerLoc);
+			isMovingTowardPlayer = newDistance < oldDistance;
+		}
+		else if (lastNpcPosition != null && lastNpcPosition.equals(currentNpcPosition))
+		{
+			// NPC didn't move this tick
+			isMovingTowardPlayer = false;
+		}
+
+		lastNpcPosition = currentNpcPosition;
+
 		if (ticksTillNextAttack > 0)
 		{
 			this.ticksTillNextAttack--;
@@ -365,32 +389,34 @@ class InfernoNPC
 				case MELEE:
 				case RANGER:
 				case MAGE:
-					// --- UPDATED: Preemptive melee prayer when meleer is about to be in range ---
-
-					if (this.getType() == Type.MELEE && !this.lastCanAttack)
+					// Enhanced melee prediction logic
+					if (this.getType() == Type.MELEE)
 					{
-						WorldPoint playerLoc = client.getLocalPlayer().getWorldLocation();
 						WorldPoint npcLoc = this.getNpc().getWorldLocation();
+						int distance = npcLoc.distanceTo(playerLoc);
 
-						boolean isAdjacent = playerLoc.distanceTo(npcLoc) <= 1 &&
-								new WorldArea(playerLoc, 1, 1).hasLineOfSightTo(client.getTopLevelWorldView(), this.getNpc().getWorldArea());
-
-						boolean willBeAdjacent = willBeAdjacentNextTick(client, playerLoc) &&
-								new WorldArea(playerLoc, 1, 1).hasLineOfSightTo(client.getTopLevelWorldView(), this.getNpc().getWorldArea());
-
-						if (willBeAdjacent && !isAdjacent)
+						// Check if meleer is 2 tiles away and moving toward player
+						if (distance == 2 && isMovingTowardPlayer && !this.lastCanAttack)
 						{
-							// Meleer will be adjacent next tick, recommend melee prayer now (1 tick before hit)
-							this.updateNextAttack(Attack.MELEE, 2);
-						}
-						else if (isAdjacent)
-						{
-							// Meleer is already adjacent, keep old logic
-							this.updateNextAttack(Attack.MELEE, 1);
+							// Predict if meleer will be adjacent next tick
+							WorldArea nextPosition = calculateNextTravellingPoint(client,
+									this.getNpc().getWorldArea(),
+									new WorldArea(playerLoc, 1, 1),
+									true);
+
+							if (nextPosition != null &&
+									nextPosition.isInMeleeDistance(playerLoc) &&
+									new WorldArea(playerLoc, 1, 1).hasLineOfSightTo(client.getTopLevelWorldView(), nextPosition))
+							{
+								// Meleer will be in range next tick - start prayer now
+								this.updateNextAttack(Attack.MELEE, 2);
+								break; // Skip normal logic
+							}
 						}
 					}
 
-					// EXISTING: For the meleer, ranger and mage the attack animation is always prioritized so only check for those
+					// EXISTING LOGIC (unchanged)
+					// For the meleer, ranger and mage the attack animation is always prioritized so only check for those
 					// Normal attack animation, doesnt suffer from defense animation bug. Activate usual attack cycle
 					if (getAnimation() == JAL_IMKOT
 							|| getAnimation() == JAL_XIL_RANGE_ATTACK || getAnimation() == JAL_XIL_MELEE_ATTACK
@@ -440,15 +466,6 @@ class InfernoNPC
 		lastAnimation = getAnimation();
 		// This is for blob (to check if player just came out of safespot)
 		lastCanAttack = this.canAttack(client, client.getLocalPlayer().getWorldLocation());
-	}
-
-	// --- ADDED: Predict if the NPC will be adjacent to the player next tick ---
-	private boolean willBeAdjacentNextTick(Client client, WorldPoint playerLoc) {
-		WorldPoint npcLoc = this.getNpc().getWorldLocation();
-		int dx = Integer.compare(playerLoc.getX(), npcLoc.getX());
-		int dy = Integer.compare(playerLoc.getY(), npcLoc.getY());
-		WorldPoint nextLoc = new WorldPoint(npcLoc.getX() + dx, npcLoc.getY() + dy, npcLoc.getPlane());
-		return nextLoc.distanceTo(playerLoc) <= 1;
 	}
 
 	private int getAnimation()
