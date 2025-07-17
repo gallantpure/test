@@ -17,10 +17,7 @@ import java.util.Map;
 import javax.inject.Inject;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Map;
 import java.util.Set;
-import java.util.List;
-import java.util.ArrayList;
 
 import net.runelite.client.plugins.inferno.displaymodes.InfernoPrayerDisplayMode;
 import net.runelite.client.plugins.inferno.displaymodes.InfernoSafespotDisplayMode;
@@ -47,6 +44,18 @@ public class InfernoOverlay extends Overlay
 	private final InfernoPlugin plugin;
 	private final InfernoConfig config;
 	private final Client client;
+
+	// Color palette for different simultaneous groups
+	private final Color[] SIMULTANEOUS_COLORS = {
+			new Color(255, 100, 100), // Red
+			new Color(100, 255, 100), // Green
+			new Color(100, 100, 255), // Blue
+			new Color(255, 255, 100), // Yellow
+			new Color(255, 100, 255), // Magenta
+			new Color(100, 255, 255), // Cyan
+			new Color(255, 165, 0),   // Orange
+			new Color(255, 192, 203)  // Pink
+	};
 
 	@Inject
 	private InfernoOverlay(final Client client, final InfernoPlugin plugin, final InfernoConfig config)
@@ -172,30 +181,142 @@ public class InfernoOverlay extends Overlay
 		return null;
 	}
 
-	// --- Optimal safespot overlay ---
-	private void renderOptimalSafespot(Graphics2D graphics)
+	// ===== SIMPLE SIMULTANEOUS ATTACK DETECTION =====
+
+	/**
+	 * Data class for simultaneous attack groups
+	 */
+	private static class SimultaneousGroup
 	{
-		// 42 is the unique code for optimal safespots (set in plugin)
-		Color optimalColor = Color.CYAN; // pick any color you want
-		int highlightAlpha = 160; // adjust for visibility
+		final List<InfernoNPC> npcs;
+		final Color color;
+		final int priority;
+		final int tick;
 
-		for (Map.Entry<WorldPoint, Integer> entry : plugin.getSafeSpotMap().entrySet())
+		SimultaneousGroup(List<InfernoNPC> npcs, Color color, int priority, int tick)
 		{
-			if (entry.getValue() == 42)
-			{
-				LocalPoint localPoint = LocalPoint.fromWorld(client.getTopLevelWorldView(), entry.getKey());
-				if (localPoint == null) continue;
-
-				Polygon tilePoly = Perspective.getCanvasTilePoly(client, localPoint);
-				if (tilePoly == null) continue;
-
-				// Render filled and border for extra visibility
-				Color fill = new Color(optimalColor.getRed(), optimalColor.getGreen(), optimalColor.getBlue(), highlightAlpha);
-				renderFilledPolygon(graphics, tilePoly, fill);
-				renderOutlinePolygon(graphics, tilePoly, optimalColor);
-			}
+			this.npcs = npcs;
+			this.color = color;
+			this.priority = priority;
+			this.tick = tick;
 		}
 	}
+
+	/**
+	 * Finds NPCs that are attacking on the same tick (using existing tick tracking)
+	 */
+	private Map<InfernoNPC, SimultaneousGroup> findSimultaneousAttackers()
+	{
+		Map<InfernoNPC, SimultaneousGroup> result = new HashMap<>();
+		List<InfernoNPC> activeNPCs = new ArrayList<>();
+
+		// Collect active NPCs that can attack
+		for (InfernoNPC npc : plugin.getInfernoNpcs())
+		{
+			if (npc.getTicksTillNextAttack() > 0
+					&& !npc.getNpc().isDead()
+					&& isAttackingNPC(npc.getType()))
+			{
+				activeNPCs.add(npc);
+			}
+		}
+
+		// Group NPCs by their exact attack tick (using existing getTicksTillNextAttack())
+		Map<Integer, List<InfernoNPC>> npcsByTick = new HashMap<>();
+		for (InfernoNPC npc : activeNPCs)
+		{
+			int attackTick = npc.getTicksTillNextAttack();
+			npcsByTick.computeIfAbsent(attackTick, k -> new ArrayList<>()).add(npc);
+		}
+
+		// Find simultaneous groups (2+ NPCs attacking on same tick with different prayers)
+		int colorIndex = 0;
+		for (Map.Entry<Integer, List<InfernoNPC>> entry : npcsByTick.entrySet())
+		{
+			int tick = entry.getKey();
+			List<InfernoNPC> npcsOnTick = entry.getValue();
+
+			// Only flag as simultaneous if 2+ NPCs and they need different prayers
+			if (npcsOnTick.size() >= 2 && requiresDifferentPrayers(npcsOnTick))
+			{
+				Color groupColor = SIMULTANEOUS_COLORS[colorIndex % SIMULTANEOUS_COLORS.length];
+				int priority = calculateGroupPriority(npcsOnTick);
+
+				SimultaneousGroup group = new SimultaneousGroup(npcsOnTick, groupColor, priority, tick);
+
+				for (InfernoNPC npc : npcsOnTick)
+				{
+					result.put(npc, group);
+				}
+
+				colorIndex++;
+			}
+		}
+
+		return result;
+	}
+
+	/**
+	 * Determines if an NPC type can attack (excludes support NPCs)
+	 */
+	private boolean isAttackingNPC(InfernoNPC.Type type)
+	{
+		return type != InfernoNPC.Type.NIBBLER
+				&& type != InfernoNPC.Type.HEALER_JAD
+				&& type != InfernoNPC.Type.HEALER_ZUK
+				&& type != InfernoNPC.Type.ZUK; // Exclude Zuk for now
+	}
+
+	/**
+	 * Checks if NPCs require different prayers (making simultaneous attacks dangerous)
+	 */
+	private boolean requiresDifferentPrayers(List<InfernoNPC> npcs)
+	{
+		Set<Prayer> prayers = new HashSet<>();
+		for (InfernoNPC npc : npcs)
+		{
+			Prayer prayer = npc.getNextAttack().getPrayer();
+			if (prayer != null)
+			{
+				prayers.add(prayer);
+			}
+		}
+		// Only dangerous if they need different prayers
+		return prayers.size() > 1;
+	}
+
+	/**
+	 * Calculates priority for a group (higher damage = higher priority)
+	 */
+	private int calculateGroupPriority(List<InfernoNPC> npcs)
+	{
+		int totalDamage = 0;
+		for (InfernoNPC npc : npcs)
+		{
+			totalDamage += getMaxDamage(npc.getType());
+		}
+		return totalDamage;
+	}
+
+	/**
+	 * Gets max damage for NPC type
+	 */
+	private int getMaxDamage(InfernoNPC.Type type)
+	{
+		switch (type)
+		{
+			case JAD: return 97;
+			case ZUK: return 120;
+			case MAGE: return 45;
+			case RANGER: return 40;
+			case MELEE: return 35;
+			case BAT: return 15;
+			case BLOB: return 20;
+			default: return 30;
+		}
+	}
+
+	// ===== END SIMPLE LOGIC =====
 
 	private void renderObstacles(Graphics2D graphics)
 	{
@@ -466,111 +587,18 @@ public class InfernoOverlay extends Overlay
 		}
 	}
 
-	// ---- EDITED REGION: Persistent simultaneous attack logic ----
-	private Set<InfernoNPC> findSimultaneousAttackers()
-	{
-		// Get all NPCs and group by type
-		Map<InfernoNPC.Type, List<InfernoNPC>> npcsByType = new HashMap<>();
-
-		for (InfernoNPC npc : plugin.getInfernoNpcs())
-		{
-			// Only include attack-capable NPCs that are alive and have attack timers
-			if (npc.getTicksTillNextAttack() > 0
-					&& !npc.getNpc().isDead()
-					&& npc.getType() != InfernoNPC.Type.NIBBLER
-					&& npc.getType() != InfernoNPC.Type.HEALER_JAD // optionally exclude healers too
-					&& npc.getType() != InfernoNPC.Type.HEALER_ZUK // optionally exclude healers too
-					&& npc.getType() != InfernoNPC.Type.ZUK // optionally exclude healers too
-			)
-			{
-				npcsByType.computeIfAbsent(npc.getType(), k -> new ArrayList<>()).add(npc);
-			}
-		}
-
-		Set<InfernoNPC> simultaneousNPCs = new HashSet<>();
-		List<InfernoNPC> allNPCs = new ArrayList<>();
-
-		// Collect all active NPCs
-		for (List<InfernoNPC> npcs : npcsByType.values())
-		{
-			allNPCs.addAll(npcs);
-		}
-
-		// Check each NPC against every other NPC for *potential* simultaneous attacks (not just soon)
-		for (int i = 0; i < allNPCs.size(); i++)
-		{
-			InfernoNPC npc1 = allNPCs.get(i);
-
-			for (int j = i + 1; j < allNPCs.size(); j++)
-			{
-				InfernoNPC npc2 = allNPCs.get(j);
-
-				if (canAttackSimultaneously(npc1, npc2))
-				{
-					simultaneousNPCs.add(npc1);
-					simultaneousNPCs.add(npc2);
-				}
-			}
-		}
-
-		return simultaneousNPCs;
-	}
-
-	// New: persistent simultaneous logic using GCD
-	private boolean canAttackSimultaneously(InfernoNPC npc1, InfernoNPC npc2)
-	{
-		// Only simultaneous if their protection prayer is different!
-		Prayer p1 = npc1.getNextAttack().getPrayer();
-		Prayer p2 = npc2.getNextAttack().getPrayer();
-		if (p1 == null || p2 == null || p1 == p2)
-			return false;
-
-		int tick1 = npc1.getTicksTillNextAttack();
-		int tick2 = npc2.getTicksTillNextAttack();
-		int cycle1 = getAttackCycle(npc1.getType());
-		int cycle2 = getAttackCycle(npc2.getType());
-		int diff = Math.abs(tick1 - tick2);
-		int gcdVal = gcd(cycle1, cycle2);
-		return gcdVal > 0 && (diff % gcdVal == 0);
-	}
-
-	private int gcd(int a, int b)
-	{
-		return b == 0 ? a : gcd(b, a % b);
-	}
-	// ---- END EDITED REGION ----
-
-	private int getAttackCycle(InfernoNPC.Type type)
-	{
-		switch (type)
-		{
-			case BAT: return 3;      // Bats attack every 3 ticks
-			case BLOB: return 6;     // Blobs attack every 6 ticks
-			case MAGE: return 5;     // Magers attack every 5 ticks
-			case RANGER: return 5;   // Rangers attack every 5 ticks
-			case MELEE: return 7;    // Meleer attack every 7 ticks
-			case JAD: return 8;      // Jad attacks every 8 ticks
-			default: return 5;       // Default cycle
-		}
-	}
-
 	private void renderTicksOnNpc(Graphics2D graphics, InfernoNPC infernoNPC, NPC renderOnNPC)
 	{
 		final Color color = (infernoNPC.getTicksTillNextAttack() == 1
 				|| (infernoNPC.getType() == InfernoNPC.Type.BLOB && infernoNPC.getTicksTillNextAttack() == 4))
 				? infernoNPC.getNextAttack().getCriticalColor() : infernoNPC.getNextAttack().getNormalColor();
 
-		// Check if this NPC is part of simultaneous attackers
-		Set<InfernoNPC> simultaneousNPCs = findSimultaneousAttackers();
-
-		// Only show "S" if NPC is alive, has attack ticks, and is simultaneous
-		boolean isSimultaneous = simultaneousNPCs.contains(infernoNPC)
-				&& !renderOnNPC.isDead()
-				&& infernoNPC.getTicksTillNextAttack() > 0;
+		// Get simultaneous attack information
+		Map<InfernoNPC, SimultaneousGroup> simultaneousNPCs = findSimultaneousAttackers();
+		SimultaneousGroup group = simultaneousNPCs.get(infernoNPC);
 
 		String tickText = String.valueOf(infernoNPC.getTicksTillNextAttack());
-		final Point canvasPoint = renderOnNPC.getCanvasTextLocation(
-				graphics, tickText, 0);
+		final Point canvasPoint = renderOnNPC.getCanvasTextLocation(graphics, tickText, 0);
 
 		if (canvasPoint != null)
 		{
@@ -579,15 +607,32 @@ public class InfernoOverlay extends Overlay
 			graphics.setColor(color);
 			graphics.drawString(tickText, canvasPoint.getX(), canvasPoint.getY());
 
-			// Draw the tiny "S" if needed (1/4 the tick size, minimum 8)
-			if (isSimultaneous)
+			// Draw simultaneous attack indicator if needed
+			if (group != null && !renderOnNPC.isDead() && infernoNPC.getTicksTillNextAttack() > 0)
 			{
-				int sFontSize = Math.max(8, plugin.getTextSize() / 4);
-				graphics.setFont(new Font("Arial", plugin.getFontStyle().getFont(), sFontSize));
+				// Calculate position for the indicator
+				int indicatorFontSize = Math.max(12, plugin.getTextSize() / 2);
+				graphics.setFont(new Font("Arial", Font.BOLD, indicatorFontSize));
+
 				int tickWidth = graphics.getFontMetrics().stringWidth(tickText);
-				int sX = canvasPoint.getX() + tickWidth + 1;
-				int sY = canvasPoint.getY() - (plugin.getTextSize() - sFontSize);
-				graphics.drawString("S", sX, sY);
+				int indicatorX = canvasPoint.getX() + tickWidth + 3;
+				int indicatorY = canvasPoint.getY() - (plugin.getTextSize() - indicatorFontSize) / 2;
+
+				// Draw background circle for better visibility
+				graphics.setColor(new Color(0, 0, 0, 180));
+				graphics.fillOval(indicatorX - 2, indicatorY - indicatorFontSize + 2,
+						indicatorFontSize + 4, indicatorFontSize + 2);
+
+				// Draw the indicator with group color
+				graphics.setColor(group.color);
+				graphics.drawString("!", indicatorX, indicatorY);
+
+				// Optional: Draw additional info for high priority groups
+				if (group.priority > 80) // High damage threshold
+				{
+					graphics.setColor(Color.RED);
+					graphics.drawString("⚠", indicatorX + 8, indicatorY);
+				}
 			}
 		}
 	}
@@ -741,6 +786,7 @@ public class InfernoOverlay extends Overlay
 	{
 		graphics.setColor(color);
 		final Stroke originalStroke = graphics.getStroke();
+		graphics.setStroke(new BasicStroke(2));
 		graphics.setStroke(new BasicStroke(2, BasicStroke.CAP_BUTT, BasicStroke.JOIN_BEVEL, 0, new float[]{9}, 0));
 		graphics.drawLine(line[0][0], line[0][1], line[1][0], line[1][1]);
 		graphics.setStroke(originalStroke);

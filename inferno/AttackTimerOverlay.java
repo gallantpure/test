@@ -62,6 +62,18 @@ public class AttackTimerOverlay extends Overlay
     @Setter(AccessLevel.PACKAGE)
     private Color attackTextColor = Color.WHITE;
 
+    // Color palette for different simultaneous groups
+    private final Color[] SIMULTANEOUS_COLORS = {
+            Color.RED,
+            Color.ORANGE,
+            Color.YELLOW,
+            Color.MAGENTA,
+            Color.CYAN,
+            new Color(255, 100, 100),
+            new Color(255, 165, 0),
+            new Color(255, 192, 203)
+    };
+
     @Inject
     AttackTimerOverlay(final InfernoPlugin plugin, final InfernoConfig config, final Client client)
     {
@@ -113,10 +125,9 @@ public class AttackTimerOverlay extends Overlay
         }
 
         // Find which specific NPCs will attack simultaneously
-        Set<InfernoNPC> simultaneousNPCs = findSimultaneousAttackers(npcsByType);
+        Map<InfernoNPC, SimultaneousGroup> simultaneousNPCs = findSimultaneousAttackers(npcsByType);
 
         // Display in priority order: Jad, Mager, Ranger, Meleer, Blob, Bat
-        // Only show if they exist
         InfernoNPC.Type[] displayOrder = {
                 InfernoNPC.Type.JAD,
                 InfernoNPC.Type.MAGE,
@@ -135,78 +146,102 @@ public class AttackTimerOverlay extends Overlay
             {
                 String typeName = getNPCTypeName(type);
 
-                // Check if we need to split into multiple lines due to different colors
-                if (hasMultipleColors(npcs, simultaneousNPCs))
+                // Check if we need to split into multiple lines due to different simultaneous groups
+                if (hasMultipleGroups(npcs, simultaneousNPCs))
                 {
-                    // Create separate lines: one for normal NPCs, one for simultaneous NPCs
-                    addMultiColorNPCLines(typeName, npcs, simultaneousNPCs);
+                    // Create separate lines for different simultaneous groups
+                    addMultiGroupNPCLines(typeName, npcs, simultaneousNPCs);
                 }
                 else
                 {
-                    // All NPCs have the same color, display on single line
+                    // All NPCs have the same status, display on single line
                     StringBuilder rightText = new StringBuilder();
+                    Color lineColor = attackTextColor;
+                    SimultaneousGroup sharedGroup = null;
 
                     for (int i = 0; i < npcs.size(); i++)
                     {
                         InfernoNPC npc = npcs.get(i);
                         int tick = npc.getTicksTillNextAttack();
                         String attackSymbol = getAttackTypeSymbol(npc.getNextAttack());
-                        String skullSymbol = simultaneousNPCs.contains(npc) ? "💀" : "";
+
+                        SimultaneousGroup group = simultaneousNPCs.get(npc);
+                        String indicator = "";
+
+                        if (group != null)
+                        {
+                            indicator = " ⚠";
+                            sharedGroup = group;
+                        }
 
                         if (i > 0)
                         {
                             rightText.append(" ");
                         }
-                        rightText.append(tick).append(" ").append(attackSymbol).append(skullSymbol);
+                        rightText.append(tick).append(" ").append(attackSymbol).append(indicator);
                     }
 
-                    // Determine color: red if ALL NPCs are simultaneous, white otherwise
-                    boolean allSimultaneous = npcs.stream().allMatch(simultaneousNPCs::contains);
-                    Color textColor = allSimultaneous ? Color.RED : attackTextColor;
+                    // Use group color if all NPCs are in the same simultaneous group
+                    if (sharedGroup != null)
+                    {
+                        lineColor = sharedGroup.color;
+                    }
 
                     panelComponent.getChildren().add(LineComponent.builder()
                             .left(typeName + ":")
                             .leftColor(attackTextColor)
                             .right(rightText.toString())
-                            .rightColor(textColor)
+                            .rightColor(lineColor)
                             .build());
                 }
             }
         }
     }
 
-    private boolean hasMultipleColors(List<InfernoNPC> npcs, Set<InfernoNPC> simultaneousNPCs)
+    private boolean hasMultipleGroups(List<InfernoNPC> npcs, Map<InfernoNPC, SimultaneousGroup> simultaneousNPCs)
     {
-        boolean hasSimultaneous = false;
-        boolean hasNonSimultaneous = false;
+        Set<SimultaneousGroup> groups = new HashSet<>();
+        boolean hasNormal = false;
 
         for (InfernoNPC npc : npcs)
         {
-            if (simultaneousNPCs.contains(npc))
+            SimultaneousGroup group = simultaneousNPCs.get(npc);
+            if (group != null)
             {
-                hasSimultaneous = true;
+                groups.add(group);
             }
             else
             {
-                hasNonSimultaneous = true;
+                hasNormal = true;
             }
         }
 
-        return hasSimultaneous && hasNonSimultaneous;
+        // Multiple groups if we have normal NPCs + simultaneous, or multiple different simultaneous groups
+        return (hasNormal && !groups.isEmpty()) || groups.size() > 1;
     }
 
-    private void addMultiColorNPCLines(String typeName, List<InfernoNPC> npcs, Set<InfernoNPC> simultaneousNPCs)
+    private void addMultiGroupNPCLines(String typeName, List<InfernoNPC> npcs, Map<InfernoNPC, SimultaneousGroup> simultaneousNPCs)
     {
-        // Group NPCs by whether they're simultaneous or not
-        List<InfernoNPC> normalNpcs = npcs.stream()
-                .filter(npc -> !simultaneousNPCs.contains(npc))
-                .collect(Collectors.toList());
+        // Group NPCs by their simultaneous group
+        Map<SimultaneousGroup, List<InfernoNPC>> groupedNpcs = new HashMap<>();
+        List<InfernoNPC> normalNpcs = new ArrayList<>();
 
-        List<InfernoNPC> simultaneousNpcs = npcs.stream()
-                .filter(simultaneousNPCs::contains)
-                .collect(Collectors.toList());
+        for (InfernoNPC npc : npcs)
+        {
+            SimultaneousGroup group = simultaneousNPCs.get(npc);
+            if (group != null)
+            {
+                groupedNpcs.computeIfAbsent(group, k -> new ArrayList<>()).add(npc);
+            }
+            else
+            {
+                normalNpcs.add(npc);
+            }
+        }
 
-        // Add line for normal (white) NPCs if any exist
+        boolean firstLine = true;
+
+        // Add line for normal (non-simultaneous) NPCs
         if (!normalNpcs.isEmpty())
         {
             StringBuilder rightText = new StringBuilder();
@@ -229,113 +264,193 @@ public class AttackTimerOverlay extends Overlay
                     .right(rightText.toString())
                     .rightColor(attackTextColor)
                     .build());
+
+            firstLine = false;
         }
 
-        // Add line for simultaneous (red) NPCs if any exist
-        if (!simultaneousNpcs.isEmpty())
+        // Add lines for each simultaneous group
+        for (Map.Entry<SimultaneousGroup, List<InfernoNPC>> entry : groupedNpcs.entrySet())
         {
+            SimultaneousGroup group = entry.getKey();
+            List<InfernoNPC> groupNpcs = entry.getValue();
+
             StringBuilder rightText = new StringBuilder();
-            for (int i = 0; i < simultaneousNpcs.size(); i++)
+            for (int i = 0; i < groupNpcs.size(); i++)
             {
-                InfernoNPC npc = simultaneousNpcs.get(i);
+                InfernoNPC npc = groupNpcs.get(i);
                 int tick = npc.getTicksTillNextAttack();
                 String attackSymbol = getAttackTypeSymbol(npc.getNextAttack());
-                String skullSymbol = "💀"; // All NPCs in this group are simultaneous
 
                 if (i > 0)
                 {
                     rightText.append(" ");
                 }
-                rightText.append(tick).append(" ").append(attackSymbol).append(skullSymbol);
+                rightText.append(tick).append(" ").append(attackSymbol).append(" ⚠");
             }
 
-            // Use empty left side if we already showed the type name for normal NPCs
-            String leftText = normalNpcs.isEmpty() ? typeName + ":" : "";
+            // Use empty left side if we already showed the type name
+            String leftText = firstLine ? typeName + ":" : "";
 
             panelComponent.getChildren().add(LineComponent.builder()
                     .left(leftText)
                     .leftColor(attackTextColor)
                     .right(rightText.toString())
-                    .rightColor(Color.RED)
+                    .rightColor(group.color)
                     .build());
+
+            firstLine = false;
         }
     }
 
-    private Set<InfernoNPC> findSimultaneousAttackers(Map<InfernoNPC.Type, List<InfernoNPC>> npcsByType)
-    {
-        Set<InfernoNPC> simultaneousNPCs = new HashSet<>();
-        List<InfernoNPC> allNPCs = new ArrayList<>();
+    // ===== SIMPLE SIMULTANEOUS ATTACK DETECTION =====
 
-        // Collect only attack-capable NPCs (exclude Nibblers and Healers)
+    /**
+     * Data class for simultaneous attack groups
+     */
+    private static class SimultaneousGroup
+    {
+        final List<InfernoNPC> npcs;
+        final Color color;
+        final int priority;
+        final int tick;
+
+        SimultaneousGroup(List<InfernoNPC> npcs, Color color, int priority, int tick)
+        {
+            this.npcs = npcs;
+            this.color = color;
+            this.priority = priority;
+            this.tick = tick;
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) return true;
+            if (!(o instanceof SimultaneousGroup)) return false;
+            SimultaneousGroup that = (SimultaneousGroup) o;
+            return tick == that.tick && priority == that.priority;
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return tick * 31 + priority;
+        }
+    }
+
+    /**
+     * Finds NPCs that are attacking on the same tick (using existing tick tracking)
+     */
+    private Map<InfernoNPC, SimultaneousGroup> findSimultaneousAttackers(Map<InfernoNPC.Type, List<InfernoNPC>> npcsByType)
+    {
+        Map<InfernoNPC, SimultaneousGroup> result = new HashMap<>();
+        List<InfernoNPC> activeNPCs = new ArrayList<>();
+
+        // Collect only attack-capable NPCs
         for (Map.Entry<InfernoNPC.Type, List<InfernoNPC>> entry : npcsByType.entrySet())
         {
             InfernoNPC.Type type = entry.getKey();
-            if (type == InfernoNPC.Type.NIBBLER ||
-                    type == InfernoNPC.Type.HEALER_JAD ||
-                    type == InfernoNPC.Type.HEALER_ZUK ||
-                    type == InfernoNPC.Type.ZUK)
+            if (isAttackingNPC(type))
             {
-                continue; // skip Nibblers, Healers, and Zuk
+                activeNPCs.addAll(entry.getValue());
             }
-            allNPCs.addAll(entry.getValue());
         }
 
-        // Check each NPC against every other NPC for *potential* simultaneous attacks (not just soon)
-        for (int i = 0; i < allNPCs.size(); i++)
+        // Group NPCs by their exact attack tick (using existing getTicksTillNextAttack())
+        Map<Integer, List<InfernoNPC>> npcsByTick = new HashMap<>();
+        for (InfernoNPC npc : activeNPCs)
         {
-            InfernoNPC npc1 = allNPCs.get(i);
+            int attackTick = npc.getTicksTillNextAttack();
+            npcsByTick.computeIfAbsent(attackTick, k -> new ArrayList<>()).add(npc);
+        }
 
-            for (int j = i + 1; j < allNPCs.size(); j++)
+        // Find simultaneous groups (2+ NPCs attacking on same tick with different prayers)
+        int colorIndex = 0;
+        for (Map.Entry<Integer, List<InfernoNPC>> entry : npcsByTick.entrySet())
+        {
+            int tick = entry.getKey();
+            List<InfernoNPC> npcsOnTick = entry.getValue();
+
+            // Only flag as simultaneous if 2+ NPCs and they need different prayers
+            if (npcsOnTick.size() >= 2 && requiresDifferentPrayers(npcsOnTick))
             {
-                InfernoNPC npc2 = allNPCs.get(j);
+                Color groupColor = SIMULTANEOUS_COLORS[colorIndex % SIMULTANEOUS_COLORS.length];
+                int priority = calculateGroupPriority(npcsOnTick);
 
-                if (canAttackSimultaneously(npc1, npc2))
+                SimultaneousGroup group = new SimultaneousGroup(npcsOnTick, groupColor, priority, tick);
+
+                for (InfernoNPC npc : npcsOnTick)
                 {
-                    simultaneousNPCs.add(npc1);
-                    simultaneousNPCs.add(npc2);
+                    result.put(npc, group);
                 }
+
+                colorIndex++;
             }
         }
 
-        return simultaneousNPCs;
+        return result;
     }
 
-    // New: persistent simultaneous logic using GCD
-    private boolean canAttackSimultaneously(InfernoNPC npc1, InfernoNPC npc2)
+    /**
+     * Determines if an NPC type can attack (excludes support NPCs)
+     */
+    private boolean isAttackingNPC(InfernoNPC.Type type)
     {
-        // Only simultaneous if their protection prayer is different!
-        Prayer p1 = npc1.getNextAttack().getPrayer();
-        Prayer p2 = npc2.getNextAttack().getPrayer();
-        if (p1 == null || p2 == null || p1 == p2)
-            return false;
-
-        int tick1 = npc1.getTicksTillNextAttack();
-        int tick2 = npc2.getTicksTillNextAttack();
-        int cycle1 = getAttackCycle(npc1.getType());
-        int cycle2 = getAttackCycle(npc2.getType());
-        int diff = Math.abs(tick1 - tick2);
-        int gcdVal = gcd(cycle1, cycle2);
-        return gcdVal > 0 && (diff % gcdVal == 0);
+        return type != InfernoNPC.Type.NIBBLER
+                && type != InfernoNPC.Type.HEALER_JAD
+                && type != InfernoNPC.Type.HEALER_ZUK
+                && type != InfernoNPC.Type.ZUK; // Exclude Zuk for now
     }
 
-    private int gcd(int a, int b)
+    /**
+     * Checks if NPCs require different prayers (making simultaneous attacks dangerous)
+     */
+    private boolean requiresDifferentPrayers(List<InfernoNPC> npcs)
     {
-        return b == 0 ? a : gcd(b, a % b);
+        Set<Prayer> prayers = new HashSet<>();
+        for (InfernoNPC npc : npcs)
+        {
+            Prayer prayer = npc.getNextAttack().getPrayer();
+            if (prayer != null)
+            {
+                prayers.add(prayer);
+            }
+        }
+        // Only dangerous if they need different prayers
+        return prayers.size() > 1;
     }
 
-    private int getAttackCycle(InfernoNPC.Type type)
+    /**
+     * Calculates priority for a group (higher damage = higher priority)
+     */
+    private int calculateGroupPriority(List<InfernoNPC> npcs)
+    {
+        int totalDamage = 0;
+        for (InfernoNPC npc : npcs)
+        {
+            totalDamage += getMaxDamage(npc.getType());
+        }
+        return totalDamage;
+    }
+
+    /**
+     * Gets max damage for NPC type
+     */
+    private int getMaxDamage(InfernoNPC.Type type)
     {
         switch (type)
         {
-            case BAT: return 3;      // Bats attack every 3 ticks
-            case BLOB: return 6;     // Blobs attack every 6 ticks
-            case MAGE: return 5;     // Magers attack every 5 ticks
-            case RANGER: return 5;   // Rangers attack every 5 ticks
-            case MELEE: return 7;    // Meleer attack every 7 ticks
-            case JAD: return 8;      // Jad attacks every 8 ticks
-            default: return 5;       // Default cycle
+            case JAD: return 97;
+            case MAGE: return 45;
+            case RANGER: return 40;
+            case MELEE: return 35;
+            case BAT: return 15;
+            case BLOB: return 20;
+            default: return 30;
         }
     }
+
+    // ===== END SIMPLE LOGIC =====
 
     private void addRecommendedPrayer()
     {

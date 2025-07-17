@@ -27,6 +27,12 @@ package net.runelite.client.plugins.inferno;
 import net.runelite.api.coords.LocalPoint;
 import net.runelite.client.plugins.example.EthanApiPlugin.EthanApiPlugin;
 import com.google.inject.Provides;
+import net.runelite.api.events.MenuOptionClicked;
+import net.runelite.api.MenuAction;
+import net.runelite.api.Scene;
+import net.runelite.api.Tile;
+import net.runelite.api.Constants;
+import net.runelite.client.eventbus.Subscribe;
 
 import java.awt.*;
 import java.util.ArrayList;
@@ -58,7 +64,6 @@ import net.runelite.api.events.GameTick;
 import net.runelite.api.events.NpcDespawned;
 import net.runelite.api.events.NpcSpawned;
 import net.runelite.client.config.ConfigManager;
-import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.NPCManager;
@@ -200,6 +205,9 @@ public class InfernoPlugin extends Plugin implements ExtensionPoint
 
     private InfernoSpawnTimerInfobox spawnTimerInfoBox;
 
+    // Add at class level for click prayer system:
+    private String lastRecommendedPrayer = null;
+
     public static final int JAL_NIB = 7574;
     public static final int JAL_MEJRAH = 7578;
     public static final int JAL_MEJRAH_STAND = 7577;
@@ -239,7 +247,7 @@ public class InfernoPlugin extends Plugin implements ExtensionPoint
 
             overlayManager.add(jadOverlay);
             overlayManager.add(prayerOverlay);
-            overlayManager.add(attackTimerOverlay); // ADD THIS LINE
+            overlayManager.add(attackTimerOverlay);
         }
     }
 
@@ -250,10 +258,264 @@ public class InfernoPlugin extends Plugin implements ExtensionPoint
         overlayManager.remove(waveOverlay);
         overlayManager.remove(jadOverlay);
         overlayManager.remove(prayerOverlay);
-        overlayManager.remove(attackTimerOverlay); // ADD THIS LINE
+        overlayManager.remove(attackTimerOverlay);
 
         infoBoxManager.removeInfoBox(spawnTimerInfoBox);
         currentWaveNumber = -1;
+    }
+
+    // ===== CLICK PRAYER SYSTEM =====
+    @Subscribe
+    public void onMenuOptionClicked(MenuOptionClicked event)
+    {
+        if (!isInInferno() || !"Walk here".equals(event.getMenuOption()))
+        {
+            return;
+        }
+
+        if (config.spawnTimerDebug())
+        {
+            spawnDebug("=== WALK CLICK DEBUG ===");
+            spawnDebug("Checking " + safeSpotMap.size() + " safespot tiles");
+        }
+
+        // Check all safespot tiles to see if any match the clicked coordinates
+        for (Map.Entry<WorldPoint, Integer> entry : safeSpotMap.entrySet())
+        {
+            WorldPoint safespotTile = entry.getKey();
+            Integer safespotValue = entry.getValue();
+
+            // Convert safespot world point to scene coordinates
+            if (isClickedTile(safespotTile, event.getParam0(), event.getParam1()))
+            {
+                if (config.spawnTimerDebug())
+                {
+                    spawnDebug("CLICKED SAFESPOT: " + safespotTile + " with value: " + safespotValue);
+                }
+
+                processClickedSafespot(safespotTile);
+                return;
+            }
+        }
+
+        if (config.spawnTimerDebug())
+        {
+            spawnDebug("No safespot tile matched click coordinates");
+        }
+    }
+
+    private boolean isClickedTile(WorldPoint safespotTile, int clickParam0, int clickParam1)
+    {
+        try
+        {
+            // For "Walk here" actions, param0 and param1 are world coordinates
+            return safespotTile.getX() == clickParam0 && safespotTile.getY() == clickParam1;
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    private void processClickedSafespot(WorldPoint clickedTile)
+    {
+        Integer safespotValue = safeSpotMap.get(clickedTile);
+
+        if (config.spawnTimerDebug())
+        {
+            spawnDebug("PROCESSING CLICKED TILE: " + clickedTile +
+                    " with safespot value: " + safespotValue);
+        }
+
+        if (safespotValue != null && safespotValue > 0)
+        {
+            Prayer recommendedPrayer = getPrayerForSafespotValue(safespotValue);
+            if (recommendedPrayer != null)
+            {
+                String recommendation = toRecommendationString(recommendedPrayer);
+
+                // Force immediate prayer recommendation
+                eventBus.post(new RecommendedPrayerChangedEvent(recommendation));
+                lastRecommendedPrayer = recommendation;
+
+                if (config.spawnTimerDebug())
+                {
+                    spawnDebug("PRAYER RECOMMENDATION SENT: " + recommendation);
+                }
+            }
+            else if (config.spawnTimerDebug())
+            {
+                spawnDebug("NO PRAYER NEEDED for safespot value: " + safespotValue);
+            }
+        }
+        else if (safespotValue != null && safespotValue == 0)
+        {
+            // Safe tile - send "none" prayer
+            eventBus.post(new RecommendedPrayerChangedEvent("none"));
+            lastRecommendedPrayer = "none";
+
+            if (config.spawnTimerDebug())
+            {
+                spawnDebug("SAFE TILE - Prayer set to none");
+            }
+        }
+        else if (config.spawnTimerDebug())
+        {
+            spawnDebug("SAFESPOT VALUE IS NULL: " + safespotValue);
+        }
+    }
+
+    private Prayer getPrayerForSafespotValue(int safespotValue)
+    {
+        switch (safespotValue)
+        {
+            case 1: // Melee only
+                return Prayer.PROTECT_FROM_MELEE;
+            case 2: // Range only
+                return Prayer.PROTECT_FROM_MISSILES;
+            case 3: // Magic only
+                return Prayer.PROTECT_FROM_MAGIC;
+            case 4: // Melee + Range - choose based on priority
+                return getPriorityPrayerForMeleeRange();
+            case 5: // Melee + Magic - choose based on priority
+                return getPriorityPrayerForMeleeMagic();
+            case 6: // Range + Magic - choose based on priority
+                return getPriorityPrayerForRangeMagic();
+            case 7: // All threats - choose highest priority
+                return getPriorityPrayerForAllThreats();
+            default:
+                return null; // Safe tile (case 0)
+        }
+    }
+
+    private Prayer getPriorityPrayerForMeleeRange()
+    {
+        // Check current NPCs that can attack this tile to determine priority
+        List<InfernoNPC> meleeThreats = new ArrayList<>();
+        List<InfernoNPC> rangeThreats = new ArrayList<>();
+
+        for (InfernoNPC npc : infernoNpcs)
+        {
+            if (!isPrayerHelper(npc) || npc.getNpc().isDead()) continue;
+
+            if (npc.getType().getDefaultAttack() == InfernoNPC.Attack.MELEE)
+            {
+                meleeThreats.add(npc);
+            }
+            else if (npc.getType().getDefaultAttack() == InfernoNPC.Attack.RANGED)
+            {
+                rangeThreats.add(npc);
+            }
+        }
+
+        // Prioritize based on immediate threats and damage potential
+        if (!meleeThreats.isEmpty() && !rangeThreats.isEmpty())
+        {
+            // If both present, prioritize based on attack timing
+            int meleeMinTicks = meleeThreats.stream().mapToInt(InfernoNPC::getTicksTillNextAttack).min().orElse(999);
+            int rangeMinTicks = rangeThreats.stream().mapToInt(InfernoNPC::getTicksTillNextAttack).min().orElse(999);
+
+            return meleeMinTicks <= rangeMinTicks ? Prayer.PROTECT_FROM_MELEE : Prayer.PROTECT_FROM_MISSILES;
+        }
+        else if (!meleeThreats.isEmpty())
+        {
+            return Prayer.PROTECT_FROM_MELEE;
+        }
+        else if (!rangeThreats.isEmpty())
+        {
+            return Prayer.PROTECT_FROM_MISSILES;
+        }
+
+        // Default to melee if no specific threats found
+        return Prayer.PROTECT_FROM_MELEE;
+    }
+
+    private Prayer getPriorityPrayerForMeleeMagic()
+    {
+        // Similar logic for melee + magic threats
+        List<InfernoNPC> meleeThreats = new ArrayList<>();
+        List<InfernoNPC> magicThreats = new ArrayList<>();
+
+        for (InfernoNPC npc : infernoNpcs)
+        {
+            if (!isPrayerHelper(npc) || npc.getNpc().isDead()) continue;
+
+            if (npc.getType().getDefaultAttack() == InfernoNPC.Attack.MELEE)
+            {
+                meleeThreats.add(npc);
+            }
+            else if (npc.getType().getDefaultAttack() == InfernoNPC.Attack.MAGIC)
+            {
+                magicThreats.add(npc);
+            }
+        }
+
+        if (!meleeThreats.isEmpty() && !magicThreats.isEmpty())
+        {
+            int meleeMinTicks = meleeThreats.stream().mapToInt(InfernoNPC::getTicksTillNextAttack).min().orElse(999);
+            int magicMinTicks = magicThreats.stream().mapToInt(InfernoNPC::getTicksTillNextAttack).min().orElse(999);
+
+            return meleeMinTicks <= magicMinTicks ? Prayer.PROTECT_FROM_MELEE : Prayer.PROTECT_FROM_MAGIC;
+        }
+        else if (!meleeThreats.isEmpty())
+        {
+            return Prayer.PROTECT_FROM_MELEE;
+        }
+        else if (!magicThreats.isEmpty())
+        {
+            return Prayer.PROTECT_FROM_MAGIC;
+        }
+
+        return Prayer.PROTECT_FROM_MAGIC; // Default to magic for blobs
+    }
+
+    private Prayer getPriorityPrayerForRangeMagic()
+    {
+        // Similar logic for range + magic threats
+        List<InfernoNPC> rangeThreats = new ArrayList<>();
+        List<InfernoNPC> magicThreats = new ArrayList<>();
+
+        for (InfernoNPC npc : infernoNpcs)
+        {
+            if (!isPrayerHelper(npc) || npc.getNpc().isDead()) continue;
+
+            if (npc.getType().getDefaultAttack() == InfernoNPC.Attack.RANGED)
+            {
+                rangeThreats.add(npc);
+            }
+            else if (npc.getType().getDefaultAttack() == InfernoNPC.Attack.MAGIC)
+            {
+                magicThreats.add(npc);
+            }
+        }
+
+        if (!rangeThreats.isEmpty() && !magicThreats.isEmpty())
+        {
+            int rangeMinTicks = rangeThreats.stream().mapToInt(InfernoNPC::getTicksTillNextAttack).min().orElse(999);
+            int magicMinTicks = magicThreats.stream().mapToInt(InfernoNPC::getTicksTillNextAttack).min().orElse(999);
+
+            return rangeMinTicks <= magicMinTicks ? Prayer.PROTECT_FROM_MISSILES : Prayer.PROTECT_FROM_MAGIC;
+        }
+        else if (!rangeThreats.isEmpty())
+        {
+            return Prayer.PROTECT_FROM_MISSILES;
+        }
+        else if (!magicThreats.isEmpty())
+        {
+            return Prayer.PROTECT_FROM_MAGIC;
+        }
+
+        return Prayer.PROTECT_FROM_MAGIC; // Default to magic
+    }
+
+    private Prayer getPriorityPrayerForAllThreats()
+    {
+        // For all threats, prioritize based on immediate danger and damage
+        Prayer emergencyPrayer = calculateEmergencyPrayer(new ArrayList<>(infernoNpcs.stream()
+                .filter(npc -> isPrayerHelper(npc) && !npc.getNpc().isDead())
+                .collect(java.util.stream.Collectors.toList())));
+
+        return emergencyPrayer != null ? emergencyPrayer : Prayer.PROTECT_FROM_MAGIC;
     }
 
     @Subscribe
@@ -316,7 +578,6 @@ public class InfernoPlugin extends Plugin implements ExtensionPoint
 
         safeSpotMap.clear();
         calculateSafespots();
-        markOptimalSafespots(); // Add this line after
         safeSpotAreas.clear();
         calculateSafespotAreas();
 
@@ -539,9 +800,6 @@ public class InfernoPlugin extends Plugin implements ExtensionPoint
         }
     }
     // ==============================================================
-
-    // Add at class level:
-    private String lastRecommendedPrayer = null;
 
     // Enhanced doPraying with emergency switching and multi-threat handling
     private void doPraying()
@@ -816,7 +1074,6 @@ public class InfernoPlugin extends Plugin implements ExtensionPoint
                 infernoNpcs.removeIf(infernoNPC -> infernoNPC.getNpc() == npc);
                 blobDeathSpots.add(new InfernoBlobDeathSpot(npc.getLocalLocation()));
             }
-
         }
     }
 
@@ -867,7 +1124,6 @@ public class InfernoPlugin extends Plugin implements ExtensionPoint
             }
         }
     }
-
 
     @Subscribe
     private void onChatMessage(ChatMessage event)
@@ -1024,57 +1280,7 @@ public class InfernoPlugin extends Plugin implements ExtensionPoint
         }
     }
 
-    private void markOptimalSafespots()
-    {
-        int searchRadius = 10; // or 20, but 10 is usually enough and fast
-        WorldPoint playerLoc = client.getLocalPlayer().getWorldLocation();
-        int bestScore = Integer.MAX_VALUE;
-        List<WorldPoint> bestTiles = new ArrayList<>();
-
-        for (int dx = -searchRadius; dx <= searchRadius; dx++)
-        {
-            for (int dy = -searchRadius; dy <= searchRadius; dy++)
-            {
-                WorldPoint tile = playerLoc.dx(dx).dy(dy);
-
-                if (obstacles.contains(tile))
-                    continue;
-
-                int prayMelee = 0, prayRange = 0, prayMagic = 0;
-
-                for (InfernoNPC npc : infernoNpcs)
-                {
-                    if (!isNormalSafespots(npc))
-                        continue;
-
-                    if (npc.canAttack(client, tile) || npc.canMoveToAttack(client, tile, obstacles))
-                    {
-                        InfernoNPC.Attack style = npc.getType().getDefaultAttack();
-                        if (style == InfernoNPC.Attack.MELEE) prayMelee = 1;
-                        else if (style == InfernoNPC.Attack.RANGED) prayRange = 1;
-                        else if (style == InfernoNPC.Attack.MAGIC) prayMagic = 1;
-                    }
-                }
-                int threatScore = prayMelee + prayRange + prayMagic;
-                if (threatScore < bestScore)
-                {
-                    bestScore = threatScore;
-                    bestTiles.clear();
-                    bestTiles.add(tile);
-                }
-                else if (threatScore == bestScore)
-                {
-                    bestTiles.add(tile);
-                }
-            }
-        }
-
-        // Overlay optimal tile(s) with a special code (e.g., 42)
-        for (WorldPoint tile : bestTiles)
-        {
-            safeSpotMap.put(tile, 42); // 42 is just a chosen unique code
-        }
-    }
+    // REMOVED markOptimalSafespots() method - was causing safespots to disappear
 
     private void calculateSafespots()
     {
